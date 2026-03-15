@@ -1,143 +1,98 @@
-import sys  #used for system-level error handling in custom exceptions
-from dataclasses import dataclass  #simplifies creation of configuration classes.
-
-import numpy as np 
+import os
+import sys
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder,StandardScaler
-
-from src.exceptions import CustomException
+import numpy as np
+import ta
 from src.logger import logging
-import os  #used for file path handling.
+from src.exceptions import CustomException
+import yaml
 
-from src.utils import save_object  #custom utility function that saves Python objects (like pipelines) as .pkl files.
+class DataTransformation:
+    def __init__(self):
+        with open('config/config.yaml', 'r') as file:
+            self.config = yaml.safe_load(file)
 
-@dataclass
-class DataTransformationConfig:
-    preprocessor_obj_file_path=os.path.join('artifacts',"proprocessor.pkl")  # Path created: artifacts/preprocessor.pkl
-    #This file stores the trained preprocessing pipeline. Later, during prediction or deployment, the same transformations must be applied.
-class DataTransformation: #handles all preprocessing operations
-    '''Creates an instance of the configuration class so the 
-       pipeline knows where to save the preprocessor object.'''
-    def __init__(self):  
-        self.data_transformation_config=DataTransformationConfig()
-
-    def get_data_transformer_object(self):  #builds the preprocessing pipeline
-        '''
-        This function si responsible for data transformation
-        
-        '''
+    def load_data(self):
         try:
-            # first we define Column Types
-            numerical_columns = ["writing_score", "reading_score"]
-            categorical_columns = [
-                "gender",
-                "race_ethnicity",
-                "parental_level_of_education",
-                "lunch",
-                "test_preparation_course",
-            ]
-
-            # This pipeline performs two steps on numeric columns
-            num_pipeline= Pipeline(
-                steps=[
-                ("imputer",SimpleImputer(strategy="median")), # handles missing values
-                ("scaler",StandardScaler())                   # Standardization
-
-                ]
-            )
-
-            #This pipeline processes categorical variable
-            cat_pipeline=Pipeline(
-
-                steps=[
-                ("imputer",SimpleImputer(strategy="most_frequent")), # Handle Missing Categories
-                ("one_hot_encoder",OneHotEncoder()),                 # Encoding into model understandable values
-                ("scaler",StandardScaler(with_mean=False))           # Standardization
-                ]
-
-            )
-
-            logging.info(f"Categorical columns: {categorical_columns}")
-            logging.info(f"Numerical columns: {numerical_columns}")
-
-            preprocessor=ColumnTransformer(
-                [
-                ("num_pipeline",num_pipeline,numerical_columns),
-                ("cat_pipelines",cat_pipeline,categorical_columns)
-
-                ]
-
-
-            )
-
-            return preprocessor
-        
+            data_path = self.config['data']['raw_path']
+            df = pd.read_csv(data_path, index_col=0, parse_dates=True)
+            logging.info(f"Data loaded from {data_path}")
+            return df
         except Exception as e:
-            raise CustomException(e,sys)
-        
-    def initiate_data_transformation(self,train_path,test_path): #This method applies the preprocessing pipeline to the training and test data.
+            logging.error("Error loading data")
+            raise CustomException(e, sys)
 
+    def handle_missing_values(self, df):
         try:
+            # Forward fill missing values using the new pandas syntax
+            df = df.ffill()
+            # Drop any remaining NaN values
+            df = df.dropna()
+            logging.info("Missing values handled")
+            return df
+        except Exception as e:
+            logging.error("Error handling missing values")
+            raise CustomException(e, sys)
+
+    def create_lagged_features(self, df):
+        try:
+            # Create lagged features
+            df['lag_1'] = df['Close'].shift(1)
+            df['lag_5'] = df['Close'].shift(5)
+            df['lag_10'] = df['Close'].shift(10)
+            logging.info("Lagged features created")
+            return df
+        except Exception as e:
+            logging.error("Error creating lagged features")
+            raise CustomException(e, sys)
+
+    def add_technical_indicators(self, df):
+        try:
+            # Moving Averages
+            df['MA20'] = ta.trend.sma_indicator(df['Close'], window=20)
+            df['MA50'] = ta.trend.sma_indicator(df['Close'], window=50)
+
+            # RSI
+            df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
+
+            logging.info("Technical indicators added")
+            return df
+        except Exception as e:
+            logging.error("Error adding technical indicators")
+            raise CustomException(e, sys)
+
+    def transform_data(self):
+        try:
+            logging.info("Starting data transformation")
+
             # Load data
-            train_df=pd.read_csv(train_path)
-            test_df=pd.read_csv(test_path)
+            df = self.load_data()
 
-            logging.info("Read train and test data completed")
+            # Handle missing values
+            df = self.handle_missing_values(df)
 
-            logging.info("Obtaining preprocessing object")
+            # Create lagged features
+            df = self.create_lagged_features(df)
 
-            preprocessing_obj=self.get_data_transformer_object() #Creates the pipeline defined earlier.
+            # Add technical indicators
+            df = self.add_technical_indicators(df)
 
-            # defining Target Variable
-            target_column_name="math_score"
-            numerical_columns = ["writing_score", "reading_score"]
+            # Drop rows with NaN values created by lagging and indicators
+            df = df.dropna()
 
-            input_feature_train_df=train_df.drop(columns=[target_column_name])
-            target_feature_train_df=train_df[target_column_name]
+            # Ensure data/processed directory exists
+            os.makedirs(os.path.dirname(self.config['data']['processed_path']), exist_ok=True)
 
-            input_feature_test_df=test_df.drop(columns=[target_column_name])
-            target_feature_test_df=test_df[target_column_name]
+            # Save processed data
+            df.to_csv(self.config['data']['processed_path'])
+            logging.info(f"Processed data saved to {self.config['data']['processed_path']}")
 
-            logging.info(
-                f"Applying preprocessing object on training dataframe and testing dataframe."
-            )
+            return self.config['data']['processed_path']
 
-            input_feature_train_arr=preprocessing_obj.fit_transform(input_feature_train_df)
-            input_feature_test_arr=preprocessing_obj.transform(input_feature_test_df)
-
-            train_arr = np.c_[
-                input_feature_train_arr, np.array(target_feature_train_df)
-            ]
-            test_arr = np.c_[input_feature_test_arr, np.array(target_feature_test_df)]
-
-            logging.info(f"Saved preprocessing object.")
-
-            '''
-               Save Preprocessing Object
-
-               Purpose:
-               During model inference or deployment, new data must go through the same preprocessing steps.
-            '''
-            save_object(
-
-                file_path=self.data_transformation_config.preprocessor_obj_file_path,
-                obj=preprocessing_obj
-
-            )
-
-            return (
-                train_arr,
-                test_arr,
-                self.data_transformation_config.preprocessor_obj_file_path,
-            )
         except Exception as e:
-            raise CustomException(e,sys)
-        
+            logging.error("Error in data transformation")
+            raise CustomException(e, sys)
 
-
-        '''preprocessing file(here pkl (pickle) format ) is used to store the preprocessing pipeline in the disk
-           (in byte stream) so that when used later in memory during model training , it can correctly guide the 
-            new or old data to be encoded and scaled in the same way to avoid any kind of ambiguity'''
+if __name__ == "__main__":
+    transformation = DataTransformation()
+    transformation.transform_data()
