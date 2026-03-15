@@ -1,61 +1,43 @@
 import os
 import sys
-from src.exceptions import CustomException
-from src.logger import logging
 import pandas as pd
+import yfinance as yf
+from src.logger import logging
+from src.exceptions import CustomException
+import yaml
 
-from sklearn.model_selection import train_test_split
-from dataclasses import dataclass
+class DataIngestion:
+    def __init__(self):
+        with open('config/config.yaml', 'r') as file:
+            self.config = yaml.safe_load(file)
 
-from src.components.data_transformation import DataTransformation
-from src.components.data_transformation import DataTransformationConfig
-
-from src.components.model_trainer import ModelTrainerConfig
-from src.components.model_trainer import ModelTrainer
-@dataclass
-class DataIngestionConfig: # stores file paths used in the pipeline.
-    train_data_path: str=os.path.join('artifacts',"train.csv")
-    test_data_path: str=os.path.join('artifacts',"test.csv")
-    raw_data_path: str=os.path.join('artifacts',"data.csv")
-
-class DataIngestion: # handles loading and splitting the dataset.
-    def __init__(self): #Creates a configuration object so the class can access test , train and raw data path 
-        self.ingestion_config=DataIngestionConfig()  
-
-    def initiate_data_ingestion(self): #performs the entire data ingestion pipeline step
-        logging.info("Entered the data ingestion method or component")
+    def download_stock_data(self):
         try:
-            df=pd.read_csv('notebook\DATA\dataset.csv')
-            logging.info('Read the dataset as dataframe')
+            logging.info("Starting data ingestion")
+            ticker = self.config['stock']['ticker']
+            start_date = self.config['stock']['start_date']
+            end_date = self.config['stock']['end_date']
 
-            os.makedirs(os.path.dirname(self.ingestion_config.train_data_path),exist_ok=True)
+            logging.info(f"Downloading data for {ticker} from {start_date} to {end_date}")
+            data = yf.download(ticker, start=start_date, end=end_date)
 
-            df.to_csv(self.ingestion_config.raw_data_path,index=False,header=True)
+            # Flatten MultiIndex columns if present
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.droplevel(1)
 
-            logging.info("Train test split initiated")
-            train_set,test_set=train_test_split(df,test_size=0.2,random_state=42)
+            # Ensure data/raw directory exists
+            os.makedirs(os.path.dirname(self.config['data']['raw_path']), exist_ok=True)
 
-            train_set.to_csv(self.ingestion_config.train_data_path,index=False,header=True)
+            # Save to CSV
+            data.to_csv(self.config['data']['raw_path'])
+            logging.info(f"Data saved to {self.config['data']['raw_path']}")
 
-            test_set.to_csv(self.ingestion_config.test_data_path,index=False,header=True)
+            return self.config['data']['raw_path']
 
-            logging.info("Ingestion of the data is completed")
-
-            #Returns paths to next pipeline components
-            return(
-                self.ingestion_config.train_data_path,
-                self.ingestion_config.test_data_path
-
-            )
         except Exception as e:
-            raise CustomException(e,sys)
-        
-if __name__=="__main__":#code runs only when script is executed directly
-    obj=DataIngestion() #Creates object
-    train_data,test_data=obj.initiate_data_ingestion() #runs ingestion.
+            logging.error("Error in data ingestion")
+            raise CustomException(e, sys)
 
-    data_transformation=DataTransformation()
-    train_arr,test_arr,_=data_transformation.initiate_data_transformation(train_data,test_data)
-
-    modeltrainer=ModelTrainer()
-    print(modeltrainer.initiate_model_trainer(train_arr,test_arr))
+if __name__ == "__main__":
+    ingestion = DataIngestion()
+    ingestion.download_stock_data()
