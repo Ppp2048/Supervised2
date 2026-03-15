@@ -1,119 +1,138 @@
 import os
 import sys
-from dataclasses import dataclass
-
-from catboost import CatBoostRegressor
-from sklearn.ensemble import (
-    AdaBoostRegressor,
-    GradientBoostingRegressor,
-    RandomForestRegressor,
-)
+import pandas as pd
+import numpy as np
+import pickle
+import json
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.tree import DecisionTreeRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
 from xgboost import XGBRegressor
-
-from src.exceptions import CustomException
 from src.logger import logging
-
-from src.utils import save_object,evaluate_models
-
-@dataclass
-class ModelTrainerConfig:
-    trained_model_file_path=os.path.join("artifacts","model.pkl")
+from src.exceptions import CustomException
+import yaml
 
 class ModelTrainer:
     def __init__(self):
-        self.model_trainer_config=ModelTrainerConfig()
+        with open('config/config.yaml', 'r') as file:
+            self.config = yaml.safe_load(file)
 
-
-    def initiate_model_trainer(self,train_array,test_array):
+    def load_data(self):
         try:
-            logging.info("Split training and test input data")
-            X_train,y_train,X_test,y_test=(
-                train_array[:,:-1],
-                train_array[:,-1],
-                test_array[:,:-1],
-                test_array[:,-1]
-            )
-            models = {
-                "Random Forest": RandomForestRegressor(),
-                "Decision Tree": DecisionTreeRegressor(),
-                "Gradient Boosting": GradientBoostingRegressor(),
-                "Linear Regression": LinearRegression(),
-                "XGBRegressor": XGBRegressor(),
-                "CatBoosting Regressor": CatBoostRegressor(verbose=False),
-                "AdaBoost Regressor": AdaBoostRegressor(),
-            }
-            params={
-                "Decision Tree": {
-                    'criterion':['squared_error', 'friedman_mse', 'absolute_error', 'poisson'],
-                    # 'splitter':['best','random'],
-                    # 'max_features':['sqrt','log2'],
-                },
-                "Random Forest":{
-                    # 'criterion':['squared_error', 'friedman_mse', 'absolute_error', 'poisson'],
-                 
-                    # 'max_features':['sqrt','log2',None],
-                    'n_estimators': [8,16,32,64,128,256]
-                },
-                "Gradient Boosting":{
-                    # 'loss':['squared_error', 'huber', 'absolute_error', 'quantile'],
-                    'learning_rate':[.1,.01,.05,.001],
-                    'subsample':[0.6,0.7,0.75,0.8,0.85,0.9],
-                    # 'criterion':['squared_error', 'friedman_mse'],
-                    # 'max_features':['auto','sqrt','log2'],
-                    'n_estimators': [8,16,32,64,128,256]
-                },
-                "Linear Regression":{},
-                "XGBRegressor":{
-                    'learning_rate':[.1,.01,.05,.001],
-                    'n_estimators': [8,16,32,64,128,256]
-                },
-                "CatBoosting Regressor":{
-                    'depth': [6,8,10],
-                    'learning_rate': [0.01, 0.05, 0.1],
-                    'iterations': [30, 50, 100]
-                },
-                "AdaBoost Regressor":{
-                    'learning_rate':[.1,.01,0.5,.001],
-                    # 'loss':['linear','square','exponential'],
-                    'n_estimators': [8,16,32,64,128,256]
-                }
-                
-            }
-
-            model_report:dict=evaluate_models(X_train=X_train,y_train=y_train,X_test=X_test,y_test=y_test,
-                                             models=models,param=params)
-            
-            ## To get best model score from dict
-            best_model_score = max(sorted(model_report.values()))
-
-            ## To get best model name from dict
-
-            best_model_name = list(model_report.keys())[
-                list(model_report.values()).index(best_model_score)
-            ]
-            best_model = models[best_model_name]
-
-            if best_model_score<0.6:
-                raise CustomException("No best model found")
-            logging.info(f"Best found model on both training and testing dataset")
-
-            save_object(
-                file_path=self.model_trainer_config.trained_model_file_path,
-                obj=best_model
-            )
-
-            predicted=best_model.predict(X_test)
-
-            r2_square = r2_score(y_test, predicted)
-            return r2_square
-            
-
-
-
-            
+            data_path = self.config['data']['processed_path']
+            df = pd.read_csv(data_path, index_col=0, parse_dates=True)
+            logging.info(f"Processed data loaded from {data_path}")
+            return df
         except Exception as e:
-            raise CustomException(e,sys)
+            logging.error("Error loading processed data")
+            raise CustomException(e, sys)
+
+    def prepare_features_target(self, df):
+        try:
+            # Features: lagged prices and technical indicators
+            features = ['lag_1', 'lag_5', 'lag_10', 'MA20', 'MA50', 'RSI']
+            target = 'Close'
+
+            X = df[features]
+            y = df[target]
+
+            logging.info("Features and target prepared")
+            return X, y
+        except Exception as e:
+            logging.error("Error preparing features and target")
+            raise CustomException(e, sys)
+
+    def train_linear_regression(self, X_train, y_train, X_test, y_test):
+        try:
+            model = LinearRegression(fit_intercept=self.config['models']['linear_regression']['fit_intercept'])
+            model.fit(X_train, y_train)
+
+            y_pred = model.predict(X_test)
+            mse = mean_squared_error(y_test, y_pred)
+            r2 = r2_score(y_test, y_pred)
+
+            logging.info(f"Linear Regression - MSE: {mse}, R2: {r2}")
+            return model, mse, r2
+        except Exception as e:
+            logging.error("Error training Linear Regression")
+            raise CustomException(e, sys)
+
+    def train_xgboost(self, X_train, y_train, X_test, y_test):
+        try:
+            model = XGBRegressor(
+                n_estimators=self.config['models']['xgboost']['n_estimators'],
+                max_depth=self.config['models']['xgboost']['max_depth'],
+                learning_rate=self.config['models']['xgboost']['learning_rate'],
+                random_state=self.config['training']['random_state']
+            )
+            model.fit(X_train, y_train)
+
+            y_pred = model.predict(X_test)
+            mse = mean_squared_error(y_test, y_pred)
+            r2 = r2_score(y_test, y_pred)
+
+            logging.info(f"XGBoost - MSE: {mse}, R2: {r2}")
+            return model, mse, r2
+        except Exception as e:
+            logging.error("Error training XGBoost")
+            raise CustomException(e, sys)
+
+    def train_models(self):
+        try:
+            logging.info("Starting model training")
+
+            # Load data
+            df = self.load_data()
+            X, y = self.prepare_features_target(df)
+
+            # Time series split
+            tscv = TimeSeriesSplit(n_splits=5)
+            splits = list(tscv.split(X))
+
+            # Get last split for final evaluation
+            train_idx, test_idx = splits[-1]
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+            # Train models
+            lr_model, lr_mse, lr_r2 = self.train_linear_regression(X_train, y_train, X_test, y_test)
+            xgb_model, xgb_mse, xgb_r2 = self.train_xgboost(X_train, y_train, X_test, y_test)
+
+            # Compare models and select best (lowest MSE)
+            models = {
+                'LinearRegression': (lr_model, lr_mse, lr_r2),
+                'XGBoost': (xgb_model, xgb_mse, xgb_r2)
+            }
+
+            best_model_name = min(models, key=lambda x: models[x][1])
+            best_model, best_mse, best_r2 = models[best_model_name]
+
+            logging.info(f"Best model: {best_model_name} with MSE: {best_mse}, R2: {best_r2}")
+
+            # Save best model
+            os.makedirs(os.path.dirname(self.config['artifacts']['model_path']), exist_ok=True)
+            with open(self.config['artifacts']['model_path'], 'wb') as f:
+                pickle.dump(best_model, f)
+
+            # Save metrics
+            metrics = {
+                'best_model': best_model_name,
+                'LinearRegression': {'mse': lr_mse, 'r2': lr_r2},
+                'XGBoost': {'mse': xgb_mse, 'r2': xgb_r2}
+            }
+
+            with open(self.config['artifacts']['metrics_path'], 'w') as f:
+                json.dump(metrics, f, indent=4)
+
+            logging.info(f"Best model saved to {self.config['artifacts']['model_path']}")
+            logging.info(f"Metrics saved to {self.config['artifacts']['metrics_path']}")
+
+            return self.config['artifacts']['model_path'], metrics
+
+        except Exception as e:
+            logging.error("Error in model training")
+            raise CustomException(e, sys)
+
+if __name__ == "__main__":
+    trainer = ModelTrainer()
+    trainer.train_models()
